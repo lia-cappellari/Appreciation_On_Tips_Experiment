@@ -1,0 +1,362 @@
+---
+title: "MCM Coffee Experiment"
+author: "Lia Cappellari, Vicky Liu, Abby Purnell, Lily Magliente"
+date: "2024-07-16"
+output: pdf_document
+---
+```{r setup, include=FALSE}
+library(foreign)
+library(data.table)
+library(sandwich)
+library(stargazer)
+library(ggplot2)
+library(lmtest)
+library(tidyverse)
+library(lubridate)
+library(dplyr)
+library(lubridate)
+library(readxl)
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Import Data
+```{r import data}
+df = read.csv('/Users/liacappellari/Desktop/School/Datasci_241/MCM Report.csv')
+
+head(df)
+```
+## Clean Data
+```{r format date, echo=FALSE}
+# Function to clean monetary columns
+
+clean_money_column <- function(column) {
+  as.numeric(gsub("[\\$,]", "", ifelse(column == "$-" | column == "" | is.na(column), "0", column)))
+}
+# Clean the relevant columns
+tips_data <- df %>%
+  mutate(Tip = clean_money_column(Tip),
+         Before.Tax.Sales = clean_money_column(Before.Tax.Sales),
+         After.tax.sales = clean_money_column(After.tax.sales),
+         Total.received = clean_money_column(Total.received),
+         Tax = clean_money_column(Tax),
+         Date = as.Date( `Date`, format = "%m/%d/%Y"),
+         # Date = mdy(Date),  # Convert Date to Date type
+         Day_of_Week = lubridate::wday(Date, label=TRUE)) # Extract Day of Week
+
+tips_data <- tips_data %>% filter(!is.na(Before.Tax.Sales))
+
+# Check for NA values in the Date and monetary columns after parsing
+sum(is.na(tips_data$Date))
+sum(is.na(tips_data$Tip))
+sum(is.na(tips_data$`Before Tax Sales`))
+sum(is.na(tips_data$`After Tax Sales`))
+sum(is.na(tips_data$`Total Received`))
+tips_data$After.tax.sales = tips_data$Before.Tax.Sales+tips_data$Tax
+```
+
+```{r}
+#change NA to $0
+tips_data <- tips_data %>%
+  mutate(Tip = ifelse(is.na(Tip), 0, Tip)) 
+
+# Set as a data table
+tips_data <- setDT(tips_data)
+
+# Aggregation for people that did tip
+tips_data[, Tipped := ifelse(test = (Tip >0), yes = 1, no =0)]
+```
+
+```{r}
+#Calculate percentage of total that was tipped 
+tips_data$tip_pct_before_tax = tips_data$Tip / tips_data$Before.Tax.Sales
+tips_data$tip_pct_after_tax = tips_data$Tip / tips_data$After.tax.sales
+```
+
+```{r}
+# Calculate summary statistics for tips
+summary_stats <- tips_data %>%
+  group_by(Treatment) %>%
+  summarize(mean_tip_pct = mean(tip_pct_before_tax, na.rm = TRUE),
+            sd_tip = sd(tip_pct_before_tax, na.rm = TRUE),
+            n = n())
+# Display the summary statistics
+summary_stats
+```
+```{r}
+summary_weekend <- tips_data %>%
+    group_by(Day.of.Week.1) %>%
+    summarise(
+      "Average Tip ($)" = round(mean(Tip, ra.rm=TRUE),3),
+      "Tip Standard Deviation ($)" = round(sd(Tip, na.rm=TRUE),3),
+      "Average Tip Percent (%)" = round(mean(tip_pct_after_tax, na.rm=TRUE),3),
+      "Tip Percent Standard Deviation (%)" = round(sd(tip_pct_before_tax, na.rm=TRUE),3),
+      "Number of Tippers" = sum(Tipped==1),
+      "Ratio" = round(n()/length(tips_data$Date), 3))
+data.table(summary_weekend)
+```
+```{r}
+# Drop unnecessary columns
+tips_data <- tips_data %>%
+  select(c(Date, Treatment, Before.Tax.Sales, After.tax.sales, Tax, Tip, Day.of.Week.1, tip_pct_before_tax, tip_pct_after_tax, Tipped))
+```
+
+## Exploratory Data Analysis
+```{r}
+summary_data <- tips_data %>%
+  group_by(Treatment) %>%
+  summarize("Total Tips" = round(sum(Tip, na.rm = TRUE),3),
+            "Total Sales" = round(sum(Before.Tax.Sales, na.rm = TRUE),3),
+            "Percent" = round((sum(Before.Tax.Sales, na.rm = TRUE)/sum(Tip, na.rm = TRUE)),3),
+            n = n())
+
+
+summary_data_long <- summary_data %>%
+  select(Treatment, `Total Tips`, `Total Sales`) %>%
+  pivot_longer(cols = c(`Total Tips`, `Total Sales`), names_to = "Type", values_to = "Amount")
+
+# Create the stacked bar chart
+ggplot(summary_data_long, aes(x = Treatment, y = Amount, fill = Type)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = Amount), position = position_stack(vjust = 0.5), size = 3) +
+  labs(title = "Total Tips and Total Sales by Treatment",
+       x = "Treatment",
+       y = "Amount",
+       fill = "Type") +
+  theme_minimal()
+
+```
+```{r}
+ggplot(tips_data, aes(x = Treatment, y = tip_pct_before_tax, fill = Treatment)) +
+  geom_boxplot() +
+  stat_summary(fun = median, geom = "text", aes(label = sprintf("%.3f", ..y..)),
+               position = position_dodge(width = 0.75), vjust = -0.5, size = 3.5, color = "purple") +
+  stat_summary(fun.data = function(y) data.frame(y = quantile(y, probs = 0.75)),
+               geom = "text", aes(label = sprintf("%.3f", ..y..)),
+               position = position_dodge(width = 0.75), vjust = -1.0, size = 3.5, color = "purple") +
+  stat_summary(fun.data = function(y) data.frame(y = quantile(y, probs = 0.25)),
+               geom = "text", aes(label = sprintf("%.3f", ..y..)),
+               position = position_dodge(width = 0.25), vjust = -0.5, size = 3.5, color = "purple") +
+  labs(title = "Box Plot of Tip Percentages by Treatment",
+       x = "Treatment",
+       y = "Tip Percent Before Taxes") +
+  theme_minimal()
+```
+```{r}
+# Pie Chart with Percentages
+num_c_t <- length(tips_data$Tip[(tips_data$Treatment=="Control")&(tips_data$Tip>0)])
+num_t_t<- length(tips_data$Tip[(tips_data$Treatment=="Treatment")&(tips_data$Tip>0)])
+num_c_nt <- length(tips_data$Tip[(tips_data$Treatment=="Control")&(tips_data$Tip==0)])
+num_t_nt<- length(tips_data$Tip[(tips_data$Treatment=="Treatment")&(tips_data$Tip==0)])
+
+slices <- c(num_c_t, num_t_t, num_c_nt, num_t_nt)
+
+lbls <- c("Control - Tip", "Treatment - Tip", "Control - No Tip", "Treatment - No Tip")
+pct <- round(slices/sum(slices)*100)
+lbls <- paste(lbls, pct)
+# add percents to labels
+lbls <- paste(lbls,"%",sep="") # ad % to labels
+pie(slices,labels = lbls, col=rainbow(length(lbls)),
+   main="Pie Chart of Tipping vs No Tipping for Treatment and Control")
+
+
+```
+```{r}
+# Treatment vs control days - average tip amount 
+
+tips_data %>%
+    group_by(Treatment) %>%
+    summarise(
+      "Average Tip ($)" = round(mean(Tip, na.rm=TRUE),3),
+      "Tip Standard Deviation ($)" = round(sd(Tip, na.rm=TRUE),3),
+      "Average Tip Percent (%)" = round(mean(tip_pct_after_tax, na.rm=TRUE),3),
+      "Tip Percent Standard Deviation (%)" = round(sd(tip_pct_after_tax, na.rm=TRUE),3),
+      "Number of Tippers" = sum(Tipped==1),
+      "Ratio" = round(n()/length(tips_data$Date), 3))
+```
+```{r}
+
+tips_data %>%
+    group_by(Day.of.Week.1) %>%
+    summarise(
+      "Average Tip ($)" = round(mean(Tip, ra.rm=TRUE),3),
+      "Tip Standard Deviation ($)" = round(sd(Tip, na.rm=TRUE),3),
+      "Average Tip Percent (%)" = round(mean(tip_pct_after_tax, na.rm=TRUE),3),
+      "Tip Percent Standard Deviation (%)" = round(sd(tip_pct_after_tax, na.rm=TRUE),3),
+      "Number of Tippers" = sum(Tipped==1),
+      "Ratio" = round(n()/length(tips_data$Date), 3))
+
+```
+```{r}
+tips_data %>%
+    filter(Tipped == 1) %>%
+    group_by(Treatment) %>%
+    summarise(
+      "Average Tip ($)" = round(mean(Tip, na.rm=TRUE),3),
+      "Tip Standard Deviation ($)" = round(sd(Tip, na.rm=TRUE),3),
+      "Average Tip Percent (%)" = round(mean(tip_pct_after_tax, na.rm=TRUE),3),
+      "Tip Percent Standard Deviation (%)" = round(sd(tip_pct_after_tax, na.rm=TRUE),3),
+      "Ratio" = round(n()/length(tips_data$Date), 3))
+```
+```{r}
+# for each day, do a bar chart for treatment vs control and the total amount of tips in dollars 
+
+# Aggregate the data
+aggregated_data <- tips_data %>%
+  group_by(Date, Treatment) %>%
+  summarise("Total Tips ($)" = sum(Tip, na.rm = TRUE))
+
+aggregated_data$Date <- as.Date(aggregated_data$Date)
+
+ggplot(aggregated_data, aes(x = Date,y = `Total Tips ($)`, fill = Treatment)) +
+  geom_bar( stat = "identity", position = "dodge") + 
+  labs(title="Total Amount of Tips by Day")+
+  scale_x_date(date_breaks = "1 day", date_labels = "%m-%d")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+```
+
+## Regression 
+```{r}
+tips_data <- tips_data %>%
+  mutate(treatment_binary = ifelse(Treatment == "Control", 0, 1)) 
+  
+
+model1 = lm(tip_pct_before_tax~treatment_binary, data=tips_data)
+robust_se_model1 <- sqrt(diag(vcovHC(model1)))
+coefci(model1, vcov. = vcovHC(model1))
+summary(model1)
+```
+
+## ATE
+```{r}
+# Calculate ATE
+control = subset(tips_data, Treatment == 'Control')
+treatment = subset(tips_data, Treatment == 'Treatment')
+avg_tip_control = mean(control$tip_pct_before_tax, na.rm=TRUE)
+avg_tip_treatment = mean(treatment$tip_pct_before_tax, na.rm=TRUE)
+ATE = avg_tip_treatment - avg_tip_control
+ATE
+```
+## HTE Regression
+```{r}
+
+# Create a binary column for day type (1 for Weekday, 0 for Weekend)
+tips_data_2 <- tips_data %>%
+  mutate(day_of_week_binary = ifelse(Day.of.Week.1 == "Weekday", 1, 0))
+
+tips_data_2 <- tips_data_2 %>%
+  mutate(Treatment = ifelse(Treatment == "Treatment", 1, 0))
+
+# tips_data_2 <- tips_data_2 %>%
+#   mutate(Treatment = as.numeric(Treatment))
+
+# Fit a linear model including the interaction term
+interaction_model <- lm(tip_pct_before_tax ~ treatment_binary + day_of_week_binary + treatment_binary * day_of_week_binary, data = tips_data_2)
+
+# Summary of the model
+summary(interaction_model)
+
+```
+
+## HTE ATE 
+```{r}
+weekend_treatment = subset(tips_data, Treatment == 'Treatment' & Day.of.Week.1=='Weekend')
+weekend_control = subset(tips_data, Treatment == 'Control' & Day.of.Week.1=='Weekend')
+
+weekday_treatment = subset(tips_data, Treatment == 'Treatment' & Day.of.Week.1=='Weekday')
+weekday_control = subset(tips_data, Treatment == 'Control' & Day.of.Week.1=='Weekday')
+
+weekend_treatment_avg = mean(weekend_treatment$tip_pct_before_tax, na.rm=TRUE)
+weekend_control_avg = mean(weekend_control$tip_pct_before_tax, na.rm=TRUE)
+
+weekday_treatment_avg = mean(weekday_treatment$tip_pct_before_tax, na.rm=TRUE)
+weekday_control_avg = mean(weekday_control$tip_pct_before_tax, na.rm=TRUE)
+
+weekday_ate = weekday_treatment_avg - weekday_control_avg
+weekend_ate = weekend_treatment_avg - weekend_control_avg
+
+print(weekday_ate)
+print(weekend_ate)
+```
+
+## Compare Models
+```{r, results='asis'}
+# Stargazer to view models 
+stargazer(model1, interaction_model, type = "latex", title = "Regression Results", 
+           column.labels = c("Baseline", "Including Day of Week Interaction"),
+          covariate.labels = c("Treatment", "Weekday", "Treatment:Weekday"),
+          dep.var.labels = c("Tip Percentage Before Tax")
+          )
+```
+
+## Post Experiment Power Analysis
+```{r}
+set.seed(1234)
+simulate_data <- function(number_of_subjects = 2000, average_tip_control, average_tip_treatment, sd_tip_control, sd_tip_treatment){
+  
+  d <- data.table(id = 1:number_of_subjects)
+  d[, assignment := rep(c('control', 'treatment'), length.out = number_of_subjects)]
+  d[assignment == 'control', tip_pct := rnorm(.N, mean = average_tip_control, sd = sd_tip_control)]
+  d[assignment == 'treatment', tip_pct := rnorm(.N, mean = average_tip_treatment, sd = sd_tip_treatment)]
+  d[tip_pct < 0, tip_pct := 0]
+  
+  return(d)
+  
+}
+simulate_sampling <- function(d, sample_size, simulations = 1000){
+  
+  
+  group_sizes = sample_size/2
+  
+  p_values <- NA
+  for(sim in 1:simulations){
+  treatment = d[d$assignment == "treatment"][sample(nrow(d[d$assignment == "treatment"]), group_sizes, replace = FALSE), ]
+  control = d[d$assignment == "control"][sample(nrow(d[d$assignment == "control"]), group_sizes, replace = FALSE), ]
+  
+  df = rbind(treatment, control)
+  model <- lm(tip_pct ~ assignment, data = df)
+    robust_se <- coeftest(model, vcov = vcovHC(model, type = "HC1"))
+    p_values[sim] <- robust_se["assignmenttreatment", "Pr(>|t|)"]
+          
+  }
+  
+  return(p_values)
+  
+}
+
+calculate_power <- function(d, sample_sizes = seq(100, length(d$id), by = 100)){
+  power_values <- list()
+  for (sample in sample_sizes) {
+    
+    p_values = simulate_sampling(d, sample_size = sample, simulations = 1000)
+    power = mean(p_values < 0.05)
+    power_values <- c(power_values, power) 
+  
+  }
+  simulated_power = data.frame(sample_size = sample_sizes, power = unlist(power_values))
+  
+  return(simulated_power)
+  
+}
+
+d <- simulate_data(
+  number_of_subjects = 2000,
+  average_tip_control = 0.0988,
+  average_tip_treatment = 0.110,
+  sd_tip_control = 0.111,
+  sd_tip_treatment = 0.113
+)
+
+simulation_1 <- calculate_power(
+  d,
+  sample_sizes = seq(100, 2000, by = 100)
+)
+
+ggplot(simulation_1, aes(x = sample_size, y = power )) +
+  geom_line(color = "blue") +
+  geom_vline(xintercept = 1531, color = "red", linetype = "dashed") +
+  geom_hline(yintercept = 0.98, color = "red", linetype = "dashed") +
+  labs(x = "Sample Size", y  = "Power", title = "Post-Experiment Power Analysis") +
+  theme_bw()
+
+```
